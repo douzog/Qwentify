@@ -12,15 +12,14 @@ I really wanted to understand **quantization**, as well as get my hands on **lla
 
 ## What Is This?
 
-A hands-on benchmark comparing **three quantization levels** of the same model, all running locally through llama.cpp:
+A hands-on benchmark comparing **two quantized Qwen3-8B variants** running locally through llama.cpp.
 
-| Model               | Bits   | Size (8B) | Speed    |
-| ------------------- | ------ | --------- | -------- |
-| Qwen3-8B (Full F16) | 16-bit | ~16 GB    | Slowest  |
-| Qwen3-8B Q4\_K\_M   | 4-bit  | ~5 GB     | Fast     |
-| Qwen3-8B Q2\_K      | 2-bit  | ~3 GB     | Fastest  |
+| Model               | Bits | Avg tokens/sec | Avg prompt latency | Avg RAM | Avg load time |
+| ------------------- | ---- | -------------- | ------------------ | ------- | ------------- |
+| Qwen3-8B Q4\_K\_M   | 4    | ~14.3          | ~14.5 s            | ~0.89 GB | ~0.9 s        |
+| Qwen3-8B Q2\_K      | 2    | ~15.6          | ~13.0 s            | ~0.36 GB | ~0.2 s        |
 
-The notebook loads each variant, fires the same prompts at them, and measures **speed (tok/s)**, **latency**, **RAM**, and **response quality** — then visualizes everything.
+The notebook loads each quantized variant, runs identical prompts, and measures **speed (tok/s)**, **latency**, **RAM**, and **response quality** — then exports the results to `qwen_benchmark_results.csv` and visualizes them in `qwen_benchmark.png`.
 
 ---
 
