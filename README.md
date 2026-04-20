@@ -2,7 +2,7 @@
 
 > Started April 19, 2026
 
-I wanted to actually understand quantization — not just read about it. So I grabbed llama.cpp, pulled Qwen3-8B off HuggingFace, and ran the same prompts through Q4\_K\_M and Q2\_K to see what breaks.
+I wanted to actually understand quantization — not just read about it. So I grabbed llama.cpp, pulled Qwen-3-8B off HuggingFace, and ran the same prompts through Q4\_K\_M and Q2\_K to see what breaks.
 
 Inspired by [Nunchaku](https://github.com/mit-han-lab/nunchaku) (which does something similar but for diffusion models). This is for LLMs.
 
@@ -16,12 +16,17 @@ Three quantization levels, same model, same prompts:
 
 | Model               | Bits   | Size  | Speed    |
 | ------------------- | ------ | ----- | -------- |
-| Qwen3-8B F16 (full) | 16-bit | ~16 GB | Slowest  |
-| Qwen3-8B Q4\_K\_M   | 4-bit  | ~5 GB  | Fast     |
-| Qwen3-8B Q2\_K      | 2-bit  | ~3 GB  | Fastest  |
+| Qwen-3-8B F16 (full) | 16-bit | ~16 GB | Slowest  |
+| Qwen-3-8B Q4\_K\_M   | 4-bit  | ~5 GB  | Fast     |
+| Qwen-3-8B Q2\_K      | 2-bit  | ~3 GB  | Fastest  |
 
 For each run I track speed (tok/s), latency, RAM, and what the model actually says.
+### Model names used in this repo
 
+- `Qwen/Qwen-3-8B` — HuggingFace base model ID used for the benchmark.
+- `qwen3-8b-f16.gguf` — full FP16 GGUF copy of Qwen-3-8B.
+- `qwen3-8b-q4km.gguf` — Q4_K_M quantized variant.
+- `qwen3-8b-q2k.gguf` — Q2_K quantized variant.
 ---
 
 ## Results
@@ -60,7 +65,7 @@ cmake --build build --config Release -j$(nproc)
 ### 2. Get the model and quantize
 
 ```bash
-hf download Qwen/Qwen3-8B --local-dir ./models/qwen3-8b
+hf download Qwen/Qwen-3-8B --local-dir ./models/qwen3-8b
 
 pip install -r requirements.txt
 python convert_hf_to_gguf.py models/qwen3-8b --outfile ../qwen3-8b-f16.gguf
