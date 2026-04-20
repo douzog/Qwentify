@@ -1,4 +1,4 @@
-# Qwentize.cpp 🥷👾
+# Qwentify 🥷👾
 
 > Started April 19, 2026
 
