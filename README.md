@@ -86,16 +86,62 @@ jupyter notebook qwen_benchmark.ipynb
 
 ---
 
-## What Q4\_K\_M actually means
+## How quantization actually works
+
+Weights come out of training as FP32 (or FP16). Quantization maps that float distribution down to a lower-bitwidth integer:
+
+```
+x_q       = round(x / scale) + zero_point
+x_dequant = (x_q - zero_point) * scale
+```
+
+`scale` and `zero_point` are computed per-block. The gap between `x` and `x_dequant` is your quantization error — you're trying to minimize it across the whole weight distribution.
+
+### What Q4\_K\_M actually is
 
 ```
 Q  4  _K_M
 │  │   │ │
-│  │   │ └── M = Medium (balanced within the K family)
-│  │   └──── K = K-quant method (smarter than basic Q4)
+│  │   │ └── M = Medium (balanced across layers)
+│  │   └──── K = K-quant (smarter block quantization)
 │  └──────── 4 = 4 bits per weight
 └─────────── Q = Quantized
 ```
+
+The older naive quants (Q4\_0, Q4\_1) used 32-weight blocks with one scale per block. **K-quants** use 256-weight blocks and a two-level scale — a high-precision super-block scale (FP16) with sub-block scales relative to it. Better range coverage, less error.
+
+The `_M` suffix means **mixed precision**: most layers run at 4-bit, but attention weights and other precision-sensitive layers stay at 6-bit. Q4\_K\_M is effectively ~4.5-bit on average. That's where most of the quality comes from.
+
+### Why Q2\_K falls apart
+
+At 2-bit you have **4 representable values per weight**. That's not enough for:
+
+- **Attention projections** — QKV layers are precision-sensitive; small errors compound across heads
+- **MLP nonlinearities** — quantization noise gets amplified
+- **Deep reasoning** — errors stack across 32+ layers and you drift far from the intended representation
+
+Q4 hits a sweet spot because transformer weight distributions are roughly Gaussian and tight — 16 buckets covers that well. 4 doesn't.
+
+### PTQ vs. QAT (why llama.cpp is fast but imperfect)
+
+llama.cpp does **PTQ (post-training quantization)** — quantize a trained model after the fact, no retraining. Fast to produce, but leaves quality on the table.
+
+**QAT (quantization-aware training)** fakes quantization during the forward pass so the model learns to tolerate it. Much better at low bitwidths — this is closer to what Nunchaku does for diffusion models.
+
+For LLMs, **GPTQ** and **AWQ** are smarter PTQ alternatives: they use calibration data to minimize layer-wise reconstruction error instead of just rounding. Both beat K-quants at equivalent bitwidths, at the cost of more compute during quantization.
+
+### The RAM numbers
+
+The difference between Q2 and Q4 is just bits per weight:
+
+```
+8B params × 2 bits / 8 = ~2 GB   (Q2_K)
+8B params × 4.5 bits / 8 = ~4.5 GB  (Q4_K_M effective)
+```
+
+The smaller delta in the benchmark (~0.36 vs ~0.89 GB) is because llama.cpp pages layers depending on your `--n-gpu-layers` setting — it doesn't load the whole model at once.
+
+---
 
 The Q2\_K tradeoff in practice:
 
@@ -103,8 +149,6 @@ The Q2\_K tradeoff in practice:
 Q4_K_M  →  "The mitochondria is the powerhouse of the cell because..."
 Q2_K    →  "The mitochondria powerhouse cell energy ATP..."
 ```
-
-It's ~2× smaller but starts to fall apart on anything complex.
 
 ---
 
