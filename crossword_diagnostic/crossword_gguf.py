@@ -38,6 +38,9 @@ from crossword_decomposition import (
     CrosswordResult,
     compare_quantization_error,
     crossword_decompose,
+    crossword_after_hadamard,
+    crossword_activation_weighted,
+    row_dominance,
     svd_variance_explained,
 )
 
@@ -283,9 +286,15 @@ def load_gguf_tensors(model_path: str,
 # ── Analysis Pipeline ────────────────────────────────────────────────────────
 
 def analyze_single_model(tensors: Dict[str, np.ndarray],
-                         model_label: str = "") -> List[dict]:
+                         model_label: str = "",
+                         run_experiments: bool = True) -> List[dict]:
     """
     Run crossword decomposition on all weight matrices in a model.
+
+    Includes experiments from the paper:
+    - Hadamard rotation (basis-invariance test)
+    - Activation weighting (salient channel amplification)
+    - Row-vs-column dominance
 
     Returns a list of per-layer result dicts.
     """
@@ -303,7 +312,10 @@ def analyze_single_model(tensors: Dict[str, np.ndarray],
         # Run rank-1 SVD for comparison (same parameter budget)
         svd_ve, svd_params = svd_variance_explained(W, rank=1)
 
-        results.append({
+        # Row-vs-column dominance
+        dom = row_dominance(decomp)
+
+        row = {
             "model": model_label,
             "tensor_name": name,
             "layer_type": layer_type,
@@ -311,17 +323,57 @@ def analyze_single_model(tensors: Dict[str, np.ndarray],
             "shape": f"{decomp.m}x{decomp.n}",
             "n_params": decomp.m * decomp.n,
             "var_total": decomp.var_total,
-            "var_explained_cw": decomp.var_explained * 100,
+            "rho2_pct": decomp.var_explained * 100,
             "var_row_pct": (decomp.var_row / decomp.var_total * 100
                            if decomp.var_total > 0 else 0),
             "var_col_pct": (decomp.var_col / decomp.var_total * 100
                            if decomp.var_total > 0 else 0),
-            "var_explained_svd1": svd_ve * 100,
+            "row_dominance": dom * 100,
+            "svd_r1_pct": svd_ve * 100,
             "compression_gain_bpp": decomp.compression_gain_bpp,
             "overhead_bpp": decomp.overhead_bpp,
             "svd_to_cw_ratio": (svd_ve / decomp.var_explained
                                 if decomp.var_explained > 0 else float('inf')),
-        })
+        }
+
+        # Experiment 1: Hadamard rotation (basis-invariance)
+        if run_experiments and layer_type in (
+            "embedding", "mlp_gate", "mlp_down", "attention_q", "attention_k"
+        ):
+            try:
+                had_decomp = crossword_after_hadamard(W)
+                row["rho2_hadamard_pct"] = had_decomp.var_explained * 100
+                row["hadamard_ratio"] = (
+                    had_decomp.var_explained / decomp.var_explained
+                    if decomp.var_explained > 0 else float('inf')
+                )
+            except Exception:
+                row["rho2_hadamard_pct"] = None
+                row["hadamard_ratio"] = None
+        else:
+            row["rho2_hadamard_pct"] = None
+            row["hadamard_ratio"] = None
+
+        # Experiment 2: Activation weighting
+        if run_experiments and layer_type in (
+            "mlp_gate", "mlp_down", "mlp_up", "attention_q", "attention_v"
+        ):
+            try:
+                act_decomp = crossword_activation_weighted(W)
+                row["rho2_actweight_pct"] = act_decomp.var_explained * 100
+                raw = decomp.var_explained * 100
+                weighted = act_decomp.var_explained * 100
+                row["actweight_change_pct"] = (
+                    (weighted - raw) / raw * 100 if raw > 0 else 0
+                )
+            except Exception:
+                row["rho2_actweight_pct"] = None
+                row["actweight_change_pct"] = None
+        else:
+            row["rho2_actweight_pct"] = None
+            row["actweight_change_pct"] = None
+
+        results.append(row)
 
     return results
 
@@ -414,22 +466,23 @@ def print_summary(results: List[dict], title: str = ""):
         by_type[r["layer_type"]].append(r)
 
     print(f"{'Layer Type':<20} {'Count':>5} {'Avg rho^2':>10} "
-          f"{'Avg SVD-r1':>10} {'Avg Gain':>10}")
-    print("-" * 60)
+          f"{'Avg SVD-r1':>10} {'Avg Gain':>10} {'Row%':>6}")
+    print("-" * 66)
 
     for ltype in sorted(by_type.keys()):
         rows = by_type[ltype]
         n = len(rows)
-        avg_cw = np.mean([r["var_explained_cw"] for r in rows])
-        avg_svd = np.mean([r["var_explained_svd1"] for r in rows])
+        avg_cw = np.mean([r["rho2_pct"] for r in rows])
+        avg_svd = np.mean([r["svd_r1_pct"] for r in rows])
         avg_gain = np.mean([r["compression_gain_bpp"] for r in rows])
+        avg_dom = np.mean([r["row_dominance"] for r in rows])
         print(f"{ltype:<20} {n:>5} {avg_cw:>9.3f}% "
-              f"{avg_svd:>9.3f}% {avg_gain:>9.4f}")
+              f"{avg_svd:>9.3f}% {avg_gain:>9.4f} {avg_dom:>5.1f}%")
 
     # Overall
-    all_cw = [r["var_explained_cw"] for r in results]
-    all_svd = [r["var_explained_svd1"] for r in results]
-    print("-" * 60)
+    all_cw = [r["rho2_pct"] for r in results]
+    all_svd = [r["svd_r1_pct"] for r in results]
+    print("-" * 66)
     print(f"{'OVERALL':<20} {len(results):>5} "
           f"{np.mean(all_cw):>9.3f}% {np.mean(all_svd):>9.3f}%")
     print()
@@ -492,7 +545,7 @@ def plot_results(results: List[dict], output_dir: str,
 
     by_type = defaultdict(list)
     for r in results:
-        by_type[r["layer_type"]].append(r["var_explained_cw"])
+        by_type[r["layer_type"]].append(r["rho2_pct"])
 
     types = sorted(by_type.keys())
     positions = range(len(types))
@@ -504,7 +557,7 @@ def plot_results(results: List[dict], output_dir: str,
     ax.set_xticks(positions)
     ax.set_xticklabels(types, rotation=45, ha="right", fontsize=9)
     ax.set_ylabel("Variance Explained by Crossword Structure (%)")
-    ax.set_title("Crossword Structure (rho^2) by Layer Type")
+    ax.set_title("Crossword Structure (ρ²) by Layer Type")
     ax.grid(axis="y", alpha=0.3)
 
     fig.tight_layout()
@@ -516,8 +569,8 @@ def plot_results(results: List[dict], output_dir: str,
     # ── Figure 2: Crossword vs SVD-r1 scatter ──
     fig, ax = plt.subplots(figsize=(7, 7))
 
-    cw_vals = [r["var_explained_cw"] for r in results]
-    svd_vals = [r["var_explained_svd1"] for r in results]
+    cw_vals = [r["rho2_pct"] for r in results]
+    svd_vals = [r["svd_r1_pct"] for r in results]
 
     ax.scatter(cw_vals, svd_vals, alpha=0.5, s=20, c="#407bff")
     lim = max(max(cw_vals), max(svd_vals)) * 1.1
@@ -535,7 +588,7 @@ def plot_results(results: List[dict], output_dir: str,
     print(f"  Saved fig2_cw_vs_svd.png")
 
     # ── Figure 3: rho^2 across layers (depth profile) ──
-    layers_with_idx = [(r["layer_index"], r["var_explained_cw"],
+    layers_with_idx = [(r["layer_index"], r["rho2_pct"],
                         r["layer_type"])
                        for r in results if r["layer_index"] >= 0]
 
@@ -633,8 +686,8 @@ def write_latex_tables(results: List[dict], output_dir: str,
         for ltype in sorted(by_type.keys()):
             rows = by_type[ltype]
             n = len(rows)
-            avg_cw = np.mean([r["var_explained_cw"] for r in rows])
-            avg_svd = np.mean([r["var_explained_svd1"] for r in rows])
+            avg_cw = np.mean([r["rho2_pct"] for r in rows])
+            avg_svd = np.mean([r["svd_r1_pct"] for r in rows])
             avg_gain = np.mean([r["compression_gain_bpp"] for r in rows])
             f.write(f"{ltype} & {n} & {avg_cw:.3f} "
                     f"& {avg_svd:.3f} & {avg_gain:.4f} \\\\\n")
@@ -716,7 +769,8 @@ def main():
 
     # ── Analyze primary model ──
     print(f"\nAnalyzing {model_label}...")
-    primary_results = analyze_single_model(primary_tensors, model_label)
+    primary_results = analyze_single_model(primary_tensors, model_label,
+                                           run_experiments=True)
     print_summary(primary_results, f"CROSSWORD STRUCTURE: {model_label}")
 
     write_csv_results(
@@ -736,7 +790,8 @@ def main():
             quantized_models[qlabel] = qtensors
 
             # Also analyze the quantized model on its own
-            qresults = analyze_single_model(qtensors, qlabel)
+            qresults = analyze_single_model(qtensors, qlabel,
+                                            run_experiments=False)
             print_summary(qresults, f"CROSSWORD STRUCTURE: {qlabel}")
             write_csv_results(
                 qresults,

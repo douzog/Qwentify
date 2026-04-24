@@ -250,3 +250,66 @@ def svd_variance_explained(W: np.ndarray, rank: int) -> Tuple[float, int]:
     n_params = k * (m + n + 1)
 
     return ve, n_params
+
+
+# ── Experiment helpers (paper §3.3) ──────────────────────────────────────────
+
+def hadamard_matrix(n: int) -> np.ndarray:
+    """
+    Construct a normalized Hadamard-like matrix of size n.
+
+    Uses the Walsh-Hadamard construction, padding to the next power of 2
+    and truncating back to n if needed.
+    """
+    from scipy.linalg import hadamard as scipy_hadamard
+
+    # Pad to next power of 2
+    k = 1
+    while k < n:
+        k *= 2
+
+    H = scipy_hadamard(k).astype(np.float64) / np.sqrt(k)
+    return H[:n, :n]
+
+
+def crossword_after_hadamard(W: np.ndarray) -> CrosswordResult:
+    """
+    Experiment 1 (§3.3): Apply Hadamard rotation to columns, then
+    recompute crossword decomposition.
+
+    If the additive structure is a coordinate artifact, rotation destroys
+    it. If it is a genuine property, rotation preserves it.
+    """
+    m, n = W.shape
+    H = hadamard_matrix(n)
+    W_rotated = W @ H
+    return crossword_decompose(W_rotated, layer_name="hadamard_rotated")
+
+
+def crossword_activation_weighted(W: np.ndarray) -> CrosswordResult:
+    """
+    Experiment 2 (§3.3): Scale each column of W by its L2 norm (proxy
+    for activation magnitude), then recompute crossword decomposition.
+
+    Tests whether additive structure is concentrated in the salient
+    channels that AWQ identifies as important.
+    """
+    col_norms = np.linalg.norm(W, axis=0)
+    # Avoid division by zero; columns with zero norm stay zero
+    col_norms = np.where(col_norms > 0, col_norms, 1.0)
+    W_weighted = W * col_norms[np.newaxis, :]
+    return crossword_decompose(W_weighted, layer_name="activation_weighted")
+
+
+def row_dominance(decomp: CrosswordResult) -> float:
+    """
+    Experiment 4 (§3.3): Row dominance ratio.
+
+    Returns Var(row) / (Var(row) + Var(col)).
+    A value near 0 means column-dominated; near 1 means row-dominated;
+    near 0.5 means balanced (typically at the noise floor).
+    """
+    total_additive = decomp.var_row + decomp.var_col
+    if total_additive > 0:
+        return decomp.var_row / total_additive
+    return 0.5  # undefined → balanced
