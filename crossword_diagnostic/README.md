@@ -178,12 +178,3 @@ crossword_diagnostic/
     ├── fig4_comparison.png
     └── fig5_dominance.png
 ```
-
-## Connection to the Paper
-
-This code implements the analysis from "Crossword Decomposition as a
-Structural Diagnostic for LLM Quantization." The paper proposes crossword
-decomposition as a cheap alternative to calibration-based methods (GPTQ, AWQ)
-for predicting which layers tolerate aggressive quantization. The key insight:
-layers with measurable additive structure (gate projections, embeddings) are
-the same layers that survive low-bit quantization in practice.
