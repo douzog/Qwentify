@@ -66,6 +66,14 @@ MODEL_REGISTRY = {
         "org": "Alibaba",
         "arch": "Dense, GQA",
     },
+    "gemma3-1b": {
+        "repo": "models--google--gemma-3-1b-pt",
+        "alt_repo": "models--unsloth--gemma-3-1b-pt",
+        "shard": "model-00001-of-*.safetensors",
+        "params": "1B",
+        "org": "Google",
+        "arch": "Dense, GQA, GeGLU",
+    },
     "stablelm2-1.6b": {
         "repo": "models--stabilityai--stablelm-2-1_6b",
         "shard": "model-00001-of-*.safetensors",
@@ -79,6 +87,13 @@ MODEL_REGISTRY = {
         "params": "4B",
         "org": "Alibaba",
         "arch": "Dense, GQA",
+    },
+    "gemma3-4b": {
+        "repo": "models--google--gemma-3-4b-pt",
+        "shard": "model-00001-of-*.safetensors",
+        "params": "4B",
+        "org": "Google",
+        "arch": "Dense, GQA, GeGLU",
     },
     "mistral-7b": {
         "repo": "models--mistralai--Mistral-7B-v0.1",
@@ -101,12 +116,26 @@ MODEL_REGISTRY = {
         "org": "Alibaba",
         "arch": "Dense, GQA",
     },
+    "gemma3-12b": {
+        "repo": "models--google--gemma-3-12b-pt",
+        "shard": "model-00001-of-*.safetensors",
+        "params": "12B",
+        "org": "Google",
+        "arch": "Dense, GQA, GeGLU",
+    },
     "phi-4-14b": {
         "repo": "models--microsoft--phi-4",
         "shard": "model-00001-of-*.safetensors",
         "params": "14B",
         "org": "Microsoft",
         "arch": "Dense, GQA",
+    },
+    "gemma3-27b": {
+        "repo": "models--google--gemma-3-27b-pt",
+        "shard": "model-00001-of-*.safetensors",
+        "params": "27B",
+        "org": "Google",
+        "arch": "Dense, GQA, GeGLU",
     },
 }
 
@@ -163,34 +192,44 @@ def find_shard_path(model_key: str) -> Optional[str]:
         return None
 
     info = MODEL_REGISTRY[model_key]
-    repo_dir = os.path.join(HF_CACHE, info["repo"])
 
-    if not os.path.isdir(repo_dir):
-        return None
+    # Try primary repo, then alt_repo if defined
+    repos_to_try = [info["repo"]]
+    if "alt_repo" in info:
+        repos_to_try.append(info["alt_repo"])
 
-    # Find the snapshot directory
-    snapshots_dir = os.path.join(repo_dir, "snapshots")
-    if not os.path.isdir(snapshots_dir):
-        return None
+    for repo_name in repos_to_try:
+        repo_dir = os.path.join(HF_CACHE, repo_name)
 
-    # Use the first (or only) snapshot
-    snapshots = sorted(os.listdir(snapshots_dir))
-    if not snapshots:
-        return None
+        if not os.path.isdir(repo_dir):
+            continue
 
-    snap_dir = os.path.join(snapshots_dir, snapshots[-1])
+        # Find the snapshot directory
+        snapshots_dir = os.path.join(repo_dir, "snapshots")
+        if not os.path.isdir(snapshots_dir):
+            continue
 
-    # Find the shard file
-    pattern = os.path.join(snap_dir, info["shard"])
-    matches = sorted(glob.glob(pattern))
+        # Use the first (or only) snapshot
+        snapshots = sorted(os.listdir(snapshots_dir))
+        if not snapshots:
+            continue
 
-    # Also try model.safetensors (single-file models)
-    if not matches:
-        single = os.path.join(snap_dir, "model.safetensors")
-        if os.path.exists(single):
-            matches = [single]
+        snap_dir = os.path.join(snapshots_dir, snapshots[-1])
 
-    return matches[0] if matches else None
+        # Find the shard file
+        pattern = os.path.join(snap_dir, info["shard"])
+        matches = sorted(glob.glob(pattern))
+
+        # Also try model.safetensors (single-file models)
+        if not matches:
+            single = os.path.join(snap_dir, "model.safetensors")
+            if os.path.exists(single):
+                matches = [single]
+
+        if matches:
+            return matches[0]
+
+    return None
 
 
 def load_shard(path: str) -> Dict[str, np.ndarray]:
