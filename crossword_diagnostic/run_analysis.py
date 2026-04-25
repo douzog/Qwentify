@@ -90,6 +90,7 @@ MODEL_REGISTRY = {
     },
     "gemma3-4b": {
         "repo": "models--google--gemma-3-4b-pt",
+        "alt_repo": "models--unsloth--gemma-3-4b-pt",
         "shard": "model-00001-of-*.safetensors",
         "params": "4B",
         "org": "Google",
@@ -97,6 +98,7 @@ MODEL_REGISTRY = {
     },
     "mistral-7b": {
         "repo": "models--mistralai--Mistral-7B-v0.1",
+        "alt_repo": "models--mistralai--Mistral-7B-v0.3",
         "shard": "model-00001-of-*.safetensors",
         "params": "7B",
         "org": "Mistral",
@@ -118,6 +120,7 @@ MODEL_REGISTRY = {
     },
     "gemma3-12b": {
         "repo": "models--google--gemma-3-12b-pt",
+        "alt_repo": "models--unsloth--gemma-3-12b-pt",
         "shard": "model-00001-of-*.safetensors",
         "params": "12B",
         "org": "Google",
@@ -132,6 +135,7 @@ MODEL_REGISTRY = {
     },
     "gemma3-27b": {
         "repo": "models--google--gemma-3-27b-pt",
+        "alt_repo": "models--unsloth--gemma-3-27b-pt",
         "shard": "model-00001-of-*.safetensors",
         "params": "27B",
         "org": "Google",
@@ -184,12 +188,16 @@ def extract_layer_index(name: str) -> int:
     return int(match.group(1)) if match else -1
 
 
-def find_shard_path(model_key: str) -> Optional[str]:
-    """Locate the first safetensors shard for a registered model."""
+def find_shard_path(model_key: str, all_shards: bool = False):
+    """Locate safetensors shard(s) for a registered model.
+    
+    If all_shards=False, returns the first shard path (str or None).
+    If all_shards=True, returns a list of all shard paths (may be empty).
+    """
     import glob
 
     if model_key not in MODEL_REGISTRY:
-        return None
+        return None if not all_shards else []
 
     info = MODEL_REGISTRY[model_key]
 
@@ -216,7 +224,7 @@ def find_shard_path(model_key: str) -> Optional[str]:
 
         snap_dir = os.path.join(snapshots_dir, snapshots[-1])
 
-        # Find the shard file
+        # Find shard files
         pattern = os.path.join(snap_dir, info["shard"])
         matches = sorted(glob.glob(pattern))
 
@@ -226,47 +234,61 @@ def find_shard_path(model_key: str) -> Optional[str]:
             if os.path.exists(single):
                 matches = [single]
 
+        # For all_shards, also find remaining shards
+        if all_shards and matches:
+            all_pattern = os.path.join(snap_dir, "model-*-of-*.safetensors")
+            all_matches = sorted(glob.glob(all_pattern))
+            if all_matches:
+                return all_matches
+            # Single file case
+            return matches
+
         if matches:
-            return matches[0]
+            return matches[0] if not all_shards else matches
 
-    return None
+    return None if not all_shards else []
 
 
-def load_shard(path: str) -> Dict[str, np.ndarray]:
-    """Load 2D weight tensors from a safetensors file."""
+def load_shard(path) -> Dict[str, np.ndarray]:
+    """Load 2D weight tensors from one or more safetensors files.
+    
+    path can be a single file path (str) or a list of file paths.
+    """
     try:
         from safetensors import safe_open
     except ImportError:
         print("  safetensors not installed. Run: pip install safetensors")
         sys.exit(1)
 
-    try:
-        import torch
-        f = safe_open(path, framework="pt")
-    except Exception:
-        f = safe_open(path, framework="numpy")
+    paths = [path] if isinstance(path, str) else path
 
     tensors = {}
-    for name in sorted(f.keys()):
-        t = f.get_tensor(name)
+    for p in paths:
+        try:
+            import torch
+            f = safe_open(p, framework="pt")
+        except Exception:
+            f = safe_open(p, framework="numpy")
 
-        # Convert to numpy float32
-        if hasattr(t, 'numpy'):
-            # PyTorch tensor
-            W = t.float().numpy()
-        else:
-            W = np.asarray(t, dtype=np.float32)
+        for name in sorted(f.keys()):
+            t = f.get_tensor(name)
 
-        # Skip non-2D
-        if W.ndim != 2:
-            continue
+            # Convert to numpy float32
+            if hasattr(t, 'numpy'):
+                W = t.float().numpy()
+            else:
+                W = np.asarray(t, dtype=np.float32)
 
-        m, n = W.shape
-        # Skip tiny matrices (norms stored as 2D with dim=1)
-        if m < 4 or n < 4:
-            continue
+            # Skip non-2D
+            if W.ndim != 2:
+                continue
 
-        tensors[name] = W
+            m, n = W.shape
+            # Skip tiny matrices (norms stored as 2D with dim=1)
+            if m < 4 or n < 4:
+                continue
+
+            tensors[name] = W
 
     return tensors
 
@@ -300,7 +322,8 @@ def analyze_model(model_key: str, shard_path: str,
 
     print(f"\n{'=' * 70}")
     print(f"  {model_key.upper()} ({info['params']} params, {info['org']})")
-    print(f"  {os.path.basename(shard_path)}")
+    shard_label = shard_path if isinstance(shard_path, str) else f"{len(shard_path)} shards"
+    print(f"  {shard_label}")
     print(f"{'=' * 70}\n")
 
     tensors = load_shard(shard_path)
@@ -789,6 +812,10 @@ def main():
         help="Skip Hadamard/activation experiments (faster).",
     )
     parser.add_argument(
+        "--full-model", action="store_true",
+        help="Load all shards (full model). Default: shard 1 only.",
+    )
+    parser.add_argument(
         "--list-models", action="store_true",
         help="List registered models and their availability.",
     )
@@ -821,28 +848,37 @@ def main():
             print(f"Unknown model: {args.model}")
             print(f"Available: {', '.join(MODEL_REGISTRY.keys())}")
             sys.exit(1)
-        path = find_shard_path(args.model)
-        if not path:
-            print(f"Model {args.model} not found in HF cache.")
-            print(f"Download it first:")
-            info = MODEL_REGISTRY[args.model]
-            repo = info["repo"].replace("models--", "").replace("--", "/")
-            print(f"  huggingface-cli download {repo}")
-            sys.exit(1)
-        models_to_run.append((args.model, path))
+        if args.full_model:
+            paths = find_shard_path(args.model, all_shards=True)
+            if not paths:
+                print(f"Model {args.model} not found in HF cache.")
+                sys.exit(1)
+            print(f"  Full model: loading {len(paths)} shard(s)")
+            models_to_run.append((args.model, paths))
+        else:
+            path = find_shard_path(args.model)
+            if not path:
+                print(f"Model {args.model} not found in HF cache.")
+                info = MODEL_REGISTRY[args.model]
+                repo = info["repo"].replace("models--", "").replace("--", "/")
+                print(f"  Download it first:")
+                print(f"  huggingface-cli download {repo}")
+                sys.exit(1)
+            models_to_run.append((args.model, path))
     else:
         # All available models
         for key in MODEL_REGISTRY:
-            path = find_shard_path(key)
-            if path:
-                models_to_run.append((key, path))
+            if args.full_model:
+                paths = find_shard_path(key, all_shards=True)
+                if paths:
+                    models_to_run.append((key, paths))
+            else:
+                path = find_shard_path(key)
+                if path:
+                    models_to_run.append((key, path))
 
         if not models_to_run:
             print("No models found in HF cache.")
-            print("Download at least one model first. Available models:")
-            for key, info in MODEL_REGISTRY.items():
-                repo = info["repo"].replace("models--", "").replace("--", "/")
-                print(f"  huggingface-cli download {repo}")
             sys.exit(1)
 
     # ── Run analysis ──
